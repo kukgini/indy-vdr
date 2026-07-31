@@ -124,6 +124,7 @@ impl From<std::io::Error> for VdrError {
     }
 }
 
+#[cfg(feature = "zmq")]
 impl From<zmq::Error> for VdrError {
     fn from(err: zmq::Error) -> VdrError {
         VdrError::new(VdrErrorKind::Connection, None, Some(Box::new(err)))

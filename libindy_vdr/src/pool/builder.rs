@@ -1,19 +1,26 @@
 use std::collections::HashMap;
 
+#[cfg(feature = "zmq")]
 use crate::common::error::prelude::*;
 use crate::config::PoolConfig;
 
+#[cfg(feature = "zmq")]
 use super::cache::Cache;
 use super::genesis::PoolTransactions;
+#[cfg(feature = "zmq")]
 use super::manager::{LocalPool, SharedPool};
+#[cfg(feature = "zmq")]
 use super::networker::{MakeLocal, MakeShared, ZMQNetworkerFactory};
+#[cfg(feature = "zmq")]
 use super::runner::PoolRunner;
+#[cfg(feature = "zmq")]
 use super::RequestResultMeta;
 
 /// A utility class for building a new pool instance or runner.
 #[derive(Clone)]
 pub struct PoolBuilder {
     pub config: PoolConfig,
+    #[cfg_attr(not(feature = "zmq"), allow(dead_code))]
     transactions: PoolTransactions,
     node_weights: Option<HashMap<String, f32>>,
     refreshed: bool,
@@ -43,6 +50,7 @@ impl PoolBuilder {
     }
 
     /// Create a `LocalPool` instance from the builder, for use in a single thread.
+    #[cfg(feature = "zmq")]
     pub fn into_local(self) -> VdrResult<LocalPool> {
         let merkle_tree = self.transactions.merkle_tree()?;
         LocalPool::build(
@@ -55,6 +63,7 @@ impl PoolBuilder {
     }
 
     /// Create a `SharedPool` instance from the builder, for use across multiple threads.
+    #[cfg(feature = "zmq")]
     pub fn into_shared(self) -> VdrResult<SharedPool> {
         let merkle_tree = self.transactions.merkle_tree()?;
 
@@ -69,6 +78,7 @@ impl PoolBuilder {
 
     /// Create a `PoolRunner` instance from the builder, to handle pool interaction
     /// in a dedicated thread.
+    #[cfg(feature = "zmq")]
     pub fn into_runner(
         self,
         cache: Option<Cache<String, (String, RequestResultMeta)>>,

@@ -22,6 +22,7 @@ futures-executor = "0.3"
 futures-util = "0.3"
 indy-vdr = { path = "../libindy_vdr", default-features = false, features = [
     "log",
+    "zmq",
 ] }
 git2 = "0.18"
 hyper = { version = "0.14", features = ["http1", "http2", "server"] }

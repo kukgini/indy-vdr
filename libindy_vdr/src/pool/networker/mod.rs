@@ -7,9 +7,13 @@ use crate::common::error::prelude::*;
 use crate::config::types::PoolConfig;
 
 use super::requests::RequestExtEvent;
-use super::types::{self, RequestHandle, Verifiers};
+#[cfg(feature = "zmq")]
+use super::types::{self};
+use super::types::{RequestHandle, Verifiers};
 
+#[cfg(feature = "zmq")]
 mod zmq;
+#[cfg(feature = "zmq")]
 pub use self::zmq::{ZMQNetworker, ZMQNetworkerFactory};
 
 /// Events used to drive a `Networker` instance
