@@ -1,13 +1,14 @@
 import type { IndyVdrPool } from '@hyperledger/indy-vdr-nodejs'
-
-import { DID, setupPool } from './utils'
-
 import { TransactionAuthorAgreementRequest } from '@hyperledger/indy-vdr-nodejs'
+import { beforeAll, describe, expect, test } from 'vitest'
+import { DID, setupPool } from './utils'
 
 describe('TransactionAuthorAgreementRequest', () => {
   let pool: IndyVdrPool
 
-  beforeAll(() => (pool = setupPool()))
+  beforeAll(() => {
+    pool = setupPool()
+  })
 
   test('Submit request', async () => {
     const request = new TransactionAuthorAgreementRequest({

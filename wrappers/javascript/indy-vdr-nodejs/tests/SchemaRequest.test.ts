@@ -1,13 +1,14 @@
 import type { IndyVdrPool } from '@hyperledger/indy-vdr-nodejs'
-
-import { DID, SCHEMA_ID, setupPool } from './utils'
-
 import { SchemaRequest } from '@hyperledger/indy-vdr-nodejs'
+import { beforeAll, describe, expect, test } from 'vitest'
+import { DID, SCHEMA_ID, setupPool } from './utils'
 
 describe('SchemaRequest', () => {
   let pool: IndyVdrPool
 
-  beforeAll(() => (pool = setupPool()))
+  beforeAll(() => {
+    pool = setupPool()
+  })
 
   test('Submit request', async () => {
     const request = new SchemaRequest({

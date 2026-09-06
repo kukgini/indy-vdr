@@ -1,4 +1,3 @@
-import type { NativeCallback, NativeCallbackWithResponse } from './ffi'
 import type {
   AcceptanceMechanismsRequestOptions,
   AttribRequestOptions,
@@ -37,83 +36,111 @@ import type {
 } from '@hyperledger/indy-vdr-shared'
 
 import { handleInvalidNullResponse, IndyVdrError } from '@hyperledger/indy-vdr-shared'
+import * as koffi from 'koffi'
 
 import {
-  deallocateCallback,
   allocateHandle,
-  allocateString,
-  toNativeCallback,
-  toNativeCallbackWithResponse,
+  allocateStringBuffer,
+  FFI_CALLBACK_NO_RESULT,
+  FFI_CALLBACK_STRING,
   serializeArguments,
 } from './ffi'
 import { getNativeIndyVdr } from './library'
 
-function handleReturnPointer<Return>(returnValue: Buffer): Return {
-  if (returnValue.address() === 0) {
+function handleReturnPointer<Return>(returnValue: [unknown] | unknown): Return {
+  const value = Array.isArray(returnValue) ? returnValue[0] : returnValue
+  if (value === null || value === undefined) {
     throw IndyVdrError.customError({ message: 'Unexpected null pointer' })
   }
-
-  return returnValue.deref() as Return
+  return value as Return
 }
 
 export class NodeJSIndyVdr implements IndyVdr {
-  private promisify = async (method: (nativeCallbackPtr: Buffer, id: number) => void): Promise<void> => {
+  private callbackId = 1
+
+  private promisify = async (method: (_: unknown, id: number) => number): Promise<void> => {
     return new Promise((resolve, reject) => {
-      const cb: NativeCallback = (id, errorCode) => {
-        deallocateCallback(id)
-
-        try {
-          this.handleError(errorCode)
-        } catch (e) {
-          reject(e)
-        }
-
-        resolve()
+      let keepAlive: NodeJS.Immediate | undefined
+      const scheduleKeepAlive = () => {
+        keepAlive = setImmediate(scheduleKeepAlive)
       }
-      const { nativeCallback, id } = toNativeCallback(cb)
-      method(nativeCallback, +id)
+      scheduleKeepAlive()
+
+      const registeredCallback = koffi.register((_cbId: number, errorCode: number) => {
+        clearImmediate(keepAlive)
+        koffi.unregister(registeredCallback)
+
+        if (errorCode !== 0) {
+          reject(this.getIndyVdrError(errorCode))
+        } else {
+          resolve()
+        }
+      }, koffi.pointer(FFI_CALLBACK_NO_RESULT))
+
+      const errorCode = method(registeredCallback, this.callbackId++)
+      if (errorCode !== 0) {
+        clearImmediate(keepAlive)
+        koffi.unregister(registeredCallback)
+        reject(this.getIndyVdrError(errorCode))
+      }
     })
   }
 
   private promisifyWithResponse = async <Return>(
-    method: (nativeCallbackWithResponsePtr: Buffer, id: number) => void,
+    method: (_: unknown, id: number) => number,
     isStream = false
   ): Promise<Return | null> => {
     return new Promise((resolve, reject) => {
-      const cb: NativeCallbackWithResponse = (id, errorCode, response) => {
-        deallocateCallback(id)
+      let keepAlive: NodeJS.Immediate | undefined
+      const scheduleKeepAlive = () => {
+        keepAlive = setImmediate(scheduleKeepAlive)
+      }
+      scheduleKeepAlive()
 
-        try {
-          this.handleError(errorCode)
-        } catch (e) {
-          return reject(e)
+      const registeredCallback = koffi.register((_cbId: number, errorCode: number, response: string) => {
+        clearImmediate(keepAlive)
+        koffi.unregister(registeredCallback)
+
+        if (errorCode !== 0) {
+          return reject(this.getIndyVdrError(errorCode))
         }
 
         try {
-          //this is required to add array brackets, and commas, to an invalid json object that
+          // this is required to add array brackets, and commas, to an invalid json object that
           // should be a list
-          const mappedResponse = isStream ? '[' + response.replace(/\n/g, ',') + ']' : response
+          const mappedResponse = isStream ? `[${response.replace(/\n/g, ',')}]` : response
 
           if (mappedResponse.length === 0) return resolve(null)
           resolve(JSON.parse(mappedResponse) as Return)
         } catch (error) {
           reject(error)
         }
+      }, koffi.pointer(FFI_CALLBACK_STRING))
+
+      const errorCode = method(registeredCallback, this.callbackId++)
+      if (errorCode !== 0) {
+        clearImmediate(keepAlive)
+        koffi.unregister(registeredCallback)
+        reject(this.getIndyVdrError(errorCode))
       }
-      const { nativeCallback, id } = toNativeCallbackWithResponse(cb)
-      method(nativeCallback, +id)
     })
+  }
+
+  private getIndyVdrError(errorCode: number): IndyVdrError {
+    const error = this.getCurrentError()
+    const errorObject = JSON.parse(error) as IndyVdrErrorObject
+    if (errorObject.code !== errorCode) {
+      return new IndyVdrError({
+        code: errorCode,
+        message: 'Error details have already been overwritten on the native side, unable to retrieve error message',
+      })
+    }
+    return new IndyVdrError(errorObject)
   }
 
   private handleError(code: number) {
     if (code === 0) return
-
-    const nativeError = allocateString()
-    this.nativeIndyVdr.indy_vdr_get_current_error(nativeError)
-
-    const indyVdrErrorObject = JSON.parse(nativeError.deref() as string) as IndyVdrErrorObject
-
-    throw new IndyVdrError(indyVdrErrorObject)
+    throw this.getIndyVdrError(code)
   }
 
   public get nativeIndyVdr() {
@@ -121,9 +148,8 @@ export class NodeJSIndyVdr implements IndyVdr {
   }
 
   public getCurrentError(): string {
-    const error = allocateString()
-    this.handleError(this.nativeIndyVdr.indy_vdr_get_current_error(error))
-
+    const error = allocateStringBuffer()
+    this.nativeIndyVdr.indy_vdr_get_current_error(error)
     return handleReturnPointer<string>(error)
   }
 
@@ -180,8 +206,6 @@ export class NodeJSIndyVdr implements IndyVdr {
   public buildGetAcceptanceMechanismsRequest(options: GetAcceptanceMechanismsRequestOptions): number {
     const requestHandle = allocateHandle()
     const { submitterDid, timestamp, version } = serializeArguments(options)
-
-    // We cannot handle this step in the serialization. Indy-vdr expects a -1 for an undefined timestamp
     const convertedTimestamp = timestamp ?? -1
 
     this.handleError(
@@ -210,6 +234,7 @@ export class NodeJSIndyVdr implements IndyVdr {
   public buildGetAttribRequest(options: GetAttribRequestOptions): number {
     const requestHandle = allocateHandle()
     const { submitterDid, targetDid, raw, hash, enc, seqNo, timestamp } = serializeArguments(options)
+    const convertedSeqNo = seqNo ?? -1
     const convertedTimestamp = timestamp ?? -1
 
     this.handleError(
@@ -219,7 +244,7 @@ export class NodeJSIndyVdr implements IndyVdr {
         raw,
         hash,
         enc,
-        seqNo,
+        convertedSeqNo,
         convertedTimestamp,
         requestHandle
       )
@@ -280,7 +305,6 @@ export class NodeJSIndyVdr implements IndyVdr {
   public buildGetRevocRegDeltaRequest(options: GetRevocationRegistryDeltaRequestOptions): number {
     const requestHandle = allocateHandle()
     const { revocationRegistryId, toTs, fromTs, submitterDid } = serializeArguments(options)
-
     const convertedFromTs = fromTs ?? -1
 
     this.handleError(
@@ -437,7 +461,6 @@ export class NodeJSIndyVdr implements IndyVdr {
   public buildTxnAuthorAgreementRequest(options: TransactionAuthorAgreementRequestOptions): number {
     const requestHandle = allocateHandle()
     const { submitterDid, version, ratificationTs, retirementTs, text } = serializeArguments(options)
-
     const convertedRatificationTs = ratificationTs ?? -1
     const convertedRetirementTs = retirementTs ?? -1
 
@@ -503,9 +526,10 @@ export class NodeJSIndyVdr implements IndyVdr {
 
   public async poolSubmitAction<T>(options: PoolSubmitActionOptions & { poolHandle: number }): Promise<T> {
     const { requestHandle, poolHandle, nodes, timeout } = serializeArguments(options)
+    const convertedTimeout = timeout ?? -1
 
     const response = await this.promisifyWithResponse<T>((cbPtr, id) =>
-      this.nativeIndyVdr.indy_vdr_pool_submit_action(poolHandle, requestHandle, nodes, timeout, cbPtr, id)
+      this.nativeIndyVdr.indy_vdr_pool_submit_action(poolHandle, requestHandle, nodes, convertedTimeout, cbPtr, id)
     )
 
     return handleInvalidNullResponse(response)
@@ -528,7 +552,7 @@ export class NodeJSIndyVdr implements IndyVdr {
   }
 
   public prepareTxnAuthorAgreementAcceptance(options: PrepareTxnAuthorAgreementAcceptanceOptions): string {
-    const output = allocateString()
+    const output = allocateStringBuffer()
     const { acceptanceMechanismType, time, taaDigest, text, version } = serializeArguments(options)
 
     this.handleError(
@@ -552,7 +576,7 @@ export class NodeJSIndyVdr implements IndyVdr {
   }
 
   public requestGetBody(options: { requestHandle: number }): string {
-    const output = allocateString()
+    const output = allocateStringBuffer()
     const { requestHandle } = serializeArguments(options)
 
     this.handleError(this.nativeIndyVdr.indy_vdr_request_get_body(requestHandle, output))
@@ -561,7 +585,7 @@ export class NodeJSIndyVdr implements IndyVdr {
   }
 
   public requestGetSignatureInput(options: { requestHandle: number }): string {
-    const output = allocateString()
+    const output = allocateStringBuffer()
     const { requestHandle } = serializeArguments(options)
 
     this.handleError(this.nativeIndyVdr.indy_vdr_request_get_signature_input(requestHandle, output))
@@ -588,7 +612,9 @@ export class NodeJSIndyVdr implements IndyVdr {
   }
 
   public requestSetTxnAuthorAgreementAcceptance(
-    options: RequestSetTxnAuthorAgreementAcceptanceOptions & { requestHandle: number }
+    options: RequestSetTxnAuthorAgreementAcceptanceOptions & {
+      requestHandle: number
+    }
   ): void {
     const { acceptance, requestHandle } = serializeArguments(options)
 

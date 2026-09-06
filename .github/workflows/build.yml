@@ -1,8 +1,8 @@
 name: "Indy-VDR"
 
-env:
-  RUST_VERSION: "1.85.0"
-  CROSS_VERSION: "0.2.5"
+# Build versions (Rust, cross, Android linkers) are defined in
+# versions.env at the repo root — the single source of truth.
+# Each job loads them with:  grep -vE '^\s*(#|$)' versions.env >> "$GITHUB_ENV"
 
 on:
   push:
@@ -47,7 +47,11 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+
+      - name: Load build config
+        shell: bash
+        run: grep -vE '^\s*(#|$)' versions.env >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -60,13 +64,12 @@ jobs:
         with:
           shared-key: deps
           cache-on-failure: true
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
 
       - name: Cargo check
-        run: cargo check
+        run: cargo check --locked
 
       - name: Cargo check TLS support
-        run: cargo check --package indy-vdr-proxy --features tls
+        run: cargo check --locked --package indy-vdr-proxy --features tls
 
       - name: Cargo fmt
         run: cargo fmt --all -- --check
@@ -82,7 +85,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+
+      - name: Load build config
+        run: grep -vE '^\s*(#|$)' versions.env >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -96,14 +102,14 @@ jobs:
           save-if: false
 
       - name: Debug build
-        run: cargo build --manifest-path libindy_vdr/Cargo.toml
+        run: cargo build --locked --manifest-path libindy_vdr/Cargo.toml
 
       - name: Run local node pool
         run: |
           ./ci/test.sh up
 
       - name: Run tests
-        run: cargo test --manifest-path libindy_vdr/Cargo.toml --features local_nodes_pool
+        run: cargo test --locked --manifest-path libindy_vdr/Cargo.toml --features local_nodes_pool
 
       - name: Stop local node pool
         run: |
@@ -142,7 +148,11 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+
+      - name: Load build config
+        shell: bash
+        run: grep -vE '^\s*(#|$)' versions.env >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -159,7 +169,7 @@ jobs:
         name: Build (cross)
         run: |
           cargo install --bins --git https://github.com/rust-embedded/cross --locked --tag v${{ env.CROSS_VERSION }} cross
-          cross build --lib --release --target ${{ matrix.target }}
+          cross build --locked --lib --release --target ${{ matrix.target }} -vv
 
       - if: ${{ !matrix.use_cross && matrix.architecture == 'darwin-universal' }}
         name: Build (mac)
@@ -170,10 +180,10 @@ jobs:
       - if: ${{ !matrix.use_cross && matrix.architecture != 'darwin-universal' }}
         name: Build (standard)
         run: |
-          cargo build --lib --release --target ${{ matrix.target }}
+          cargo build --locked --lib --release --target ${{ matrix.target }} -vv
 
       - name: Upload library artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: library-${{ matrix.architecture }}
           path: target/${{ matrix.target }}/release/${{ matrix.lib }}
@@ -212,15 +222,15 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: "Use Golang 1.16.x+"
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: "^1.16.0"
 
       - name: Fetch library artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: library-linux-x86_64
 
@@ -234,73 +244,100 @@ jobs:
     name: Build and Test JavaScript wrapper
     needs: [build-release]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     defaults:
       run:
         working-directory: wrappers/javascript
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.2
 
       - name: Set up Node.JS 20.x
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 20.x
+          cache: pnpm
+          cache-dependency-path: wrappers/javascript/pnpm-lock.yaml
           registry-url: "https://registry.npmjs.org/"
 
-      - name: Enable Corepack
-        run: corepack enable
-
-      - name: Set Yarn version to 4
-        run: yarn set version 4.9.2
-
       - name: Fetch library artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: library-linux-x86_64
 
       - name: Install dependencies
-        run: yarn install
+        run: pnpm install --frozen-lockfile
 
       - name: Build
-        run: yarn build
+        run: pnpm build
 
-      - name: Lint
-        run: yarn lint
-
-      - name: Check format
-        run: yarn check-format
+      - name: Check style
+        run: pnpm style:check
 
       - name: Check types
-        run: yarn check-types
+        run: pnpm types:check
 
       - name: Run local node pool
         run: |
           cd ../../
-          docker build -f ci/indy-pool.dockerfile -t test_pool --build-arg pool_ip=10.0.0.2 ci
-          docker network create --subnet=10.0.0.0/8 indy-sdk-network
-          docker run -d --name indy_pool -p 9701-9708:9701-9708 --net=indy-sdk-network test_pool
+          docker build --platform linux/amd64 -f ci/indy-pool.dockerfile -t test_pool --build-arg pool_ip=10.0.0.2 ci
+          docker network create --subnet=10.0.0.0/8 indy-sdk-network 2>/dev/null || true
+          docker run -d --platform linux/amd64 --name indy_pool -p 9701-9708:9701-9708 --net=indy-sdk-network test_pool
+          # Wait for all 4 nodes to reach participating state (up to 60s)
+          echo "Waiting for pool nodes to reach participating state..."
+          for i in $(seq 1 60); do
+            count=$(docker exec indy_pool bash -c "grep -l 'participating' /var/log/indy/sandbox/Node*.log 2>/dev/null | wc -l" 2>/dev/null || echo 0)
+            echo "  attempt $i: $count/4 nodes participating"
+            if [ "$count" -ge "4" ]; then
+              echo "Pool ready."
+              break
+            fi
+            sleep 1
+          done
           cd wrappers/javascript
           docker exec $(docker ps -aqf "ancestor=test_pool") cat /var/lib/indy/sandbox/pool_transactions_genesis >> genesis.txn
+
+      - name: Debug pool container
+        run: |
+          docker ps -a
+          docker logs --tail 200 indy_pool || true
+          docker inspect indy_pool --format '{{json .State}}' || true
+          lsof -i TCP:9701-9708 -sTCP:LISTEN 2>/dev/null || ss -lntp 2>/dev/null | grep -E ':(970[1-8])' || true
 
       - name: Run tests
         env:
           # binary is downloaded to root of repository
           LIB_INDY_VDR_PATH: ../../../
-        run: yarn test
+        run: pnpm test
 
       - name: Publish JavaScript Wrapper
         if: |
           github.event_name == 'release' ||
           (github.event_name == 'workflow_dispatch' && github.event.inputs.publish-javascript-wrapper == 'true')
         run: |
-          if [[ $(cat lerna.json | grep version | head -1 | grep dev) ]]; then
-            npx lerna publish from-package --no-push --no-private --yes --no-git-tag-version --dist-tag=alpha
-          else
-            npx lerna publish from-package --no-push --no-private --yes --no-git-tag-version
+          npm install -g npm@^11
+          # Determine dist-tag based on version (dev versions get alpha tag)
+          DIST_TAG_FLAG=""
+          if [[ $(grep version lerna.json | head -1 | grep dev) ]]; then
+            DIST_TAG_FLAG="--tag alpha"
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # pnpm pack resolves workspace:* and catalog: references into real versions
+          for pkg in indy-vdr-shared indy-vdr-nodejs indy-vdr-react-native; do
+            (cd "$pkg" && pnpm pack --pack-destination ../)
+          done
+          # Publish tarballs with npm (uses setup-node auth and supports provenance)
+          for pkg in indy-vdr-shared indy-vdr-nodejs indy-vdr-react-native; do
+            tarball=$(ls hyperledger-${pkg}-*.tgz 2>/dev/null | sort -V | tail -1)
+            npm publish --provenance --access public $DIST_TAG_FLAG "$tarball"
+          done
 
   build-ios:
     name: Build library (iOS)
@@ -312,7 +349,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+
+      - name: Load build config
+        run: grep -vE '^\s*(#|$)' versions.env >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -342,14 +382,14 @@ jobs:
           # Force ZMQ to use the correct compiler for iOS
           export CC=$(xcrun --find clang)
           export CXX=$(xcrun --find clang++)
-          cargo build --lib --release --target ${{ matrix.target }} --package indy-vdr
+          cargo build --locked --lib --release --target ${{ matrix.target }} --package indy-vdr
 
       - name: List files in target
         run: |
           ls -la target/${{ matrix.target }}/release/
 
       - name: Save library
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: library-${{ matrix.target}}
           path: target/${{ matrix.target }}/release/libindy_vdr.a
@@ -361,10 +401,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Fetch static libraries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
 
       - name: Debug - List downloaded files
         run: find . -name "*.a" | sort
@@ -382,12 +422,12 @@ jobs:
                                  library-x86_64-apple-ios
 
       - name: Save xcframework
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: indy_vdr.xcframework
           path: ./out
 
-      - uses: geekyeggo/delete-artifact@v5
+      - uses: geekyeggo/delete-artifact@v6
         with:
           name: |
             library-aarch64-apple-ios
@@ -411,7 +451,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+
+      - name: Load build config
+        run: grep -vE '^\s*(#|$)' versions.env >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -427,12 +470,51 @@ jobs:
 
       - name: Build
         run: |
+          # The cross Docker images bake in CROSS_CMAKE_OBJECT_FLAGS with
+          # --target triples that lack an API level suffix. Without a suffix,
+          # clang defines __ANDROID_API_FUTURE__ and exposes symbols like
+          # pthread_cond_clockwait (API 30+) that crash on older devices.
+          #
+          # We fix this at two layers:
+          #   1. CROSS_CMAKE_OBJECT_FLAGS — overrides the toolchain.cmake CACHE
+          #      (helps non-cmake-rs cmake builds).
+          #   2. CFLAGS / CXXFLAGS — the cc crate appends these to compiler
+          #      flags, and cmake-rs forwards them via -DCMAKE_C_FLAGS which
+          #      takes precedence over the toolchain CACHE.
+          # In both cases the last --target= wins in clang.
+          case "${{ matrix.target }}" in
+            aarch64-linux-android)    clang_target="aarch64-linux-android${CROSS_ANDROID_SDK}" ;;
+            armv7-linux-androideabi)  clang_target="armv7a-linux-androideabi${CROSS_ANDROID_SDK}" ;;
+            i686-linux-android)       clang_target="i686-linux-android${CROSS_ANDROID_SDK}" ;;
+            x86_64-linux-android)     clang_target="x86_64-linux-android${CROSS_ANDROID_SDK}" ;;
+          esac
+          export CROSS_CMAKE_OBJECT_FLAGS="--target=${clang_target} -DANDROID -ffunction-sections -fdata-sections -fPIC"
+          export CFLAGS="--target=${clang_target}"
+          export CXXFLAGS="--target=${clang_target}"
+
           cargo install --bins --git https://github.com/rust-embedded/cross --locked --tag v${{ env.CROSS_VERSION }} cross
-          # Using default Cross images since custom ones were removed from Cross.toml
-          cross build --lib --release --target ${{matrix.target}} --package indy-vdr
+          cross build --locked --lib --release --target ${{ matrix.target }} --package indy-vdr -vv
+
+      - name: Validate NDK API level (21)
+        shell: bash
+        run: |
+          lib_path="target/${{ matrix.target }}/release/libindy_vdr.so"
+          sdk_note=$(readelf -n "$lib_path" | awk '/Android/ {in_note=1} in_note && /description data:/ {print; exit}')
+          echo "$sdk_note" 
+          if readelf -Ws "$lib_path" | grep -q "pthread_cond_clockwait"; then
+            echo "Found pthread_cond_clockwait in $lib_path (requires API 30+)"
+            readelf -Ws "$lib_path" | grep "pthread_cond_clockwait"
+            exit 1
+          fi
+
+          if ! echo "$sdk_note" | grep -q "description data: 15 00 00 00"; then
+            echo "Expected Android SDK version 21 in $lib_path (.note.android.ident)"
+            readelf -n "$lib_path"
+            exit 1
+          fi
 
       - name: Save library
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: library-${{matrix.target}}
           path: target/${{ matrix.target }}/release/libindy_vdr.so
@@ -443,7 +525,7 @@ jobs:
     needs: build-android
     steps:
       - name: Fetch libraries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
 
       - run: |
           sudo mkdir ./libs
@@ -453,12 +535,12 @@ jobs:
           sudo mv library-x86_64-linux-android    ./libs/x86_64
 
       - name: Save Android library
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: android-libraries
           path: ./libs
 
-      - uses: geekyeggo/delete-artifact@v5
+      - uses: geekyeggo/delete-artifact@v6
         with:
           name: |
             library-aarch64-linux-android
@@ -480,13 +562,13 @@ jobs:
 
     steps:
       - name: Fetch Android libraries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: android-libraries
           path: mobile/android/
 
       - name: Fetch iOS Framework
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: indy_vdr.xcframework
           path: mobile/ios/
@@ -530,10 +612,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -543,7 +625,7 @@ jobs:
           pip install setuptools wheel twine auditwheel
 
       - name: Fetch library artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: library-${{ matrix.architecture }}
           path: wrappers/python/indy_vdr/
@@ -569,7 +651,7 @@ jobs:
           grep -q manylinux_2_17_ auditwheel.log
 
       - name: Upload python package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: python-${{ matrix.architecture }}
           path: wrappers/python/dist/*
